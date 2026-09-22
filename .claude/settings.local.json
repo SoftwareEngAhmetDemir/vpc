@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(aws --version)",
+      "Bash(npm -v)"
+    ]
+  }
+}
