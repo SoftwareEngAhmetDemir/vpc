@@ -147,45 +147,16 @@ You'll attach this to the backend (and optionally frontend) EC2 instance at laun
    - Advanced details → IAM instance profile: `ec2-ssm-role`.
 2. Launch.
 3. Once running, select the instance → **Connect** → **Session Manager** tab → **Connect**. This opens a browser-based shell — no SSH key or public IP needed.
-4. In that shell, install Node.js and get the app onto the box:
+4. Push [deploy/backend-deploy.sh](deploy/backend-deploy.sh) onto the box (paste its contents into `nano backend-deploy.sh`, or `git clone` your repo first and run it from there), then run it with the values from earlier steps:
 
    ```bash
-   sudo dnf install -y nodejs git
-   node -v
-   git clone <your-repo-url> app   # or upload the backend/ folder another way (e.g. `aws s3 cp` from an S3 bucket)
-   cd app/backend
-   npm install
+   REPO_URL=https://github.com/<you>/<repo>.git \
+   RDS_ENDPOINT=<the RDS endpoint from step 8.3> \
+   DB_PASSWORD=<the master password you set> \
+   bash backend-deploy.sh
    ```
 
-5. Create `backend/.env` on the instance (use `nano .env`):
-
-   ```
-   PORT=3001
-   DB_HOST=<the RDS endpoint from step 8.3>
-   DB_PORT=5432
-   DB_USER=postgres
-   DB_PASSWORD=<the master password you set>
-   DB_NAME=vpcdemo
-   DB_SSL=true
-   ```
-
-6. Load the schema against RDS. Easiest way from this box:
-
-   ```bash
-   sudo dnf install -y postgresql16
-   psql "host=<rds-endpoint> port=5432 dbname=vpcdemo user=postgres password=<password> sslmode=require" -f schema.sql
-   ```
-
-7. Run the API as a background service so it survives logout/reboot:
-
-   ```bash
-   sudo npm install -g pm2
-   pm2 start server.js --name backend
-   pm2 startup   # follow the printed command to enable on boot
-   pm2 save
-   ```
-
-8. Note this instance's **private IPv4 address** (Instance summary in the console) — you'll need it for the nginx config on the frontend.
+   This installs Node/git/psql, clones the repo, writes `backend/.env`, loads `schema.sql` into RDS, and runs the API under `pm2` (auto-restarts on crash/reboot). It prints the instance's private IP at the end — note it for the frontend step.
 
 ## 10. Launch the frontend EC2 instance (public subnet)
 
@@ -199,33 +170,15 @@ You'll attach this to the backend (and optionally frontend) EC2 instance at laun
      - Security group: existing → `frontend-sg`
    - IAM instance profile: `ec2-ssm-role` (optional, so you can also use SSM instead of SSH).
 2. Launch. Note its **public IPv4 address** once running.
-3. Connect (Session Manager or SSH) and install nginx + Node (Node only needed to *build* the React app; you can also build locally and upload just the `dist/` folder):
+3. Connect (Session Manager or SSH), then push [deploy/frontend-deploy.sh](deploy/frontend-deploy.sh) onto the box the same way as the backend script, and run it:
 
    ```bash
-   sudo dnf install -y nginx nodejs git
-   sudo systemctl enable --now nginx
-   git clone <your-repo-url> app
-   cd app/frontend
+   REPO_URL=https://github.com/<you>/<repo>.git \
+   BACKEND_PRIVATE_IP=<backend private IP from step 9.4's output> \
+   bash frontend-deploy.sh
    ```
 
-4. Point the build at the backend via the reverse proxy (same-origin), then build:
-
-   ```bash
-   echo "VITE_API_URL=" > .env.production
-   npm install
-   npm run build
-   ```
-
-5. Deploy the build output and configure nginx:
-
-   ```bash
-   sudo mkdir -p /var/www/vpc-demo
-   sudo cp -r dist /var/www/vpc-demo/
-   sudo cp nginx.conf.example /etc/nginx/conf.d/vpc-demo.conf
-   sudo sed -i "s/BACKEND_PRIVATE_IP/<backend private IP from step 9.8>/" /etc/nginx/conf.d/vpc-demo.conf
-   sudo rm -f /etc/nginx/conf.d/default.conf   # avoid conflicting default site, if present
-   sudo nginx -t && sudo systemctl reload nginx
-   ```
+   This installs nginx/Node/git, clones the repo, builds the React app with `VITE_API_URL` empty (same-origin), deploys the build to `/var/www/vpc-demo`, and writes an nginx config that proxies `/api/*` to the backend's private IP.
 
 ## 11. Test it
 
