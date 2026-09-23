@@ -29,6 +29,9 @@ Sources are security group references, not CIDRs. Each SG needs a description (r
 ## 3. IAM
 
 - Role `ec2-ssm-role`: trusted entity AWS service / EC2, policy `AmazonSSMManagedInstanceCore` (verified attached). Used as the instance profile on both EC2 instances so Session Manager works without SSH or a bastion.
+- Identity provider (OIDC) `token.actions.githubusercontent.com`, audience `sts.amazonaws.com` (for GitHub Actions, see section 9).
+- Policy `github-deploy-ssm` (customer managed): `ssm:SendCommand` on the two instance ARNs and `arn:aws:ssm:eu-north-1::document/AWS-RunShellScript`; `ssm:GetCommandInvocation` and `ssm:ListCommandInvocations` on `*`.
+- Role `github-deploy-role` (`arn:aws:iam::087134855638:role/github-deploy-role`): web identity, only `github-deploy-ssm` attached. Trust policy: principal is the OIDC provider above, `aud` = `sts.amazonaws.com`, `sub` = `repo:SoftwareEngAhmetDemir@43875085/vpc@1382315640:ref:refs/heads/main`.
 
 ## 4. RDS
 
@@ -64,29 +67,29 @@ Backend (`ssm-user`, run from `~/app/deploy`):
 - Verified: `curl localhost:3001/api/health` returns ok, `/api/items` returns the 3 rows.
 
 Frontend:
-- `sudo dnf install -y git`, clone, then `bash frontend-deploy.sh` with `REPO_URL`, `BACKEND_PRIVATE_IP=10.0.11.246`: installed nginx, nodejs, git; built the React app (`VITE_API_URL` empty) into `/var/www/vpc-demo/dist`; wrote `/etc/nginx/conf.d/vpc-demo.conf` proxying `/api/` to `http://10.0.11.246:3001/api/`.
+- `sudo dnf install -y git`, clone, then `bash frontend-deploy.sh` with `REPO_URL`, `BACKEND_PRIVATE_IP=10.0.11.246`: installed nginx, nodejs, git; built the React app; wrote `/etc/nginx/conf.d/vpc-demo.conf` proxying `/api/` to `http://10.0.11.246:3001/api/` (first design, replaced in section 8).
 - Manual fix: AL2023's `/etc/nginx/nginx.conf` has its own default `server { server_name _; }` that beat our conf and returned 404 for `/api/items`. Removed it with `sudo sed -i '/^    server {$/,/^    }$/d' /etc/nginx/nginx.conf`, then `nginx -t` and reload. This edit exists only on this instance.
 
-## 7. Result
+## 7. Result (first working state)
 
-`http://13.63.170.46` shows "Hello World" and the 3 items. Deployed state (before section 8): browser, frontend nginx :80, proxy `/api/*`, backend Express :3001 (private), RDS :5432 (private). Backend and RDS have no public IP and no inbound route from the internet; the only public entry point is the frontend's port 80. The private subnets reach the internet outbound only, through the NAT gateway.
+`http://13.63.170.46` showed "Hello World" and the 3 items: browser, frontend nginx :80, proxy `/api/*`, backend Express :3001 (private), RDS :5432 (private). Backend and RDS have no public IP and no inbound route from the internet; the only public entry point is the frontend's port 80. The private subnets reach the internet outbound only, through the NAT gateway. Downside found: `/api/items` was readable by anyone through the nginx proxy, because the browser itself had to call it.
 
-## 8. Change: hide the API from the browser (code done, NOT yet deployed to the frontend instance)
+## 8. Change: hide the API from the browser (DEPLOYED)
 
-Problem: with nginx proxying `/api/*`, `http://13.63.170.46/api/items` was readable by anyone, because the browser had to call it.
-New design: `frontend/server.js` (Express, port 3000, run by pm2) fetches `http://10.0.11.246:3001/api/items` server-side, injects the result into `index.html` as `window.__INITIAL_STATE__`, and returns 404 on `/api/*`. nginx forwards port 80 to `127.0.0.1:3000` and has no `/api` location. Nothing in AWS (SGs, subnets, routes) changes.
-To apply on the frontend instance (SSM): `cd ~/app && git pull && cd deploy && BACKEND_PRIVATE_IP=10.0.11.246 REPO_URL=https://github.com/SoftwareEngAhmetDemir/vpc.git bash frontend-deploy.sh`. The old `~/app/deploy/app` clone from the first run is unused and can be deleted.
-Both deploy scripts now also use `$HOME/app`, the IMDSv2 token for the IP lookup, and the frontend script removes the AL2023 default nginx server block itself.
+New design: `frontend/server.js` (Express, port 3000, run by pm2 as `frontend`) fetches `http://10.0.11.246:3001/api/items` server-side, injects the result into `index.html` as `window.__INITIAL_STATE__`, and returns 404 on `/api/*`. nginx forwards port 80 to `127.0.0.1:3000` and has no `/api` location. `App.jsx` uses the injected state in production and still fetches `VITE_API_URL` in local dev. `frontend/.env.production` was deleted. Nothing in AWS (SGs, subnets, routes) changed.
+Deploy scripts were also fixed: they use `$HOME/app`, the IMDSv2 token for the IP lookup, and `frontend-deploy.sh` removes the AL2023 default nginx server block itself (so the manual `sed` in section 6 is now part of the script). New: `deploy/update-backend.sh` (npm install, pm2 restart, health check), `deploy/ssm-run.sh` (SSM Run Command wrapper).
 
-## 9. Planned: CI/CD pipeline (code written, AWS side NOT done yet)
+## 9. CI/CD with GitHub Actions (DONE and working)
 
-`.github/workflows/deploy.yml`: CI (build, syntax checks) on every push/PR; CD on `main` only, deploying via SSM Run Command (`deploy/ssm-run.sh`) as `ssm-user`: `deploy/update-backend.sh` on the backend, `deploy/frontend-deploy.sh` on the frontend. Deploy job is skipped while repo variable `AWS_ROLE_ARN` is unset.
-AWS changes still to make (steps in `DEPLOY_AWS.md` section 13): IAM OIDC provider `token.actions.githubusercontent.com`; IAM policy `github-deploy-ssm` (SendCommand on the two instances + `AWS-RunShellScript`, GetCommandInvocation); IAM role `github-deploy-role` trusted only for `repo:SoftwareEngAhmetDemir/vpc:ref:refs/heads/main`. GitHub repo variables: `AWS_REGION`, `AWS_ROLE_ARN`, `BACKEND_INSTANCE_ID`, `FRONTEND_INSTANCE_ID`, `BACKEND_PRIVATE_IP`.
-The first pipeline run also performs the section 8 migration on the frontend instance.
+`.github/workflows/deploy.yml`: CI (install, build, `node --check`, `bash -n`) on every push and PR. CD on pushes to `main` after CI passes: assumes `github-deploy-role` via OIDC (no stored keys), then runs through SSM Run Command as `ssm-user`: `deploy/update-backend.sh` on the backend, `deploy/frontend-deploy.sh` on the frontend, both after `git reset --hard <commit>` in `~/app`. The deploy job is skipped if repo variable `AWS_ROLE_ARN` is unset.
+GitHub repo variables (set with `gh variable set`, none secret): `AWS_REGION=eu-north-1`, `AWS_ROLE_ARN`, `BACKEND_INSTANCE_ID`, `FRONTEND_INSTANCE_ID`, `BACKEND_PRIVATE_IP=10.0.11.246`.
+Problem hit: the first deploy failed with "Not authorized to perform sts:AssumeRoleWithWebIdentity" although the trust policy looked right. This repo uses immutable OIDC subjects (`gh api repos/SoftwareEngAhmetDemir/vpc/actions/oidc/customization/sub` shows the prefix), so the token `sub` contains owner and repo IDs. Fixed by editing the trust policy `sub` to the ID form (section 3).
+First successful run (re-run of run 35928625323): CI 11s, deploy 49s. Verified afterwards from outside: `/api/items` returns 404, `/` returns 200 with the items embedded in the HTML, backend private IP unreachable.
+Not automated: `schema.sql` (run `psql` by hand from the backend), `backend/.env` edits, any AWS infrastructure change.
 
 ## 10. Open items
 
-- The code changes in sections 8 and 9 are not committed or pushed yet.
-- The GitHub repo was switched to public so instances can clone without credentials.
+- The GitHub repo is public (needed so the instances can `git clone` without credentials). The role trust policy only allows `main` of this repo, so forks and PRs cannot deploy.
 - The RDS master password was typed into a chat and shell history. Rotate it or move it to Secrets Manager beyond a demo.
-- Billing while running: NAT gateway (hourly + data), RDS `db.t4g.micro`, two t3.micro. Teardown order: EC2 instances, RDS (skip final snapshot), NAT gateway, release its Elastic IP, then route tables, subnets, IGW, VPC (see `DEPLOY_AWS.md` step 12).
+- The frontend public IP `13.63.170.46` is auto-assigned, not an Elastic IP, and changes if the instance is stopped and started.
+- Billing while running: NAT gateway (hourly + data), RDS `db.t4g.micro`, two t3.micro. Teardown order: EC2 instances, RDS (skip final snapshot), NAT gateway, release its Elastic IP, then route tables, subnets, IGW, VPC (see `DEPLOY_AWS.md` step 12). For the pipeline, also delete `github-deploy-role`, `github-deploy-ssm` and the OIDC provider if unused.

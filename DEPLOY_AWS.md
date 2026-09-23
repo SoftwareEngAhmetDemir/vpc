@@ -229,6 +229,15 @@ Do this once in the Console (region eu-north-1 for the policy resource ARNs; IAM
    ```
 
 3. **IAM → Roles → Create role**: trusted entity **Web identity**, provider `token.actions.githubusercontent.com`, audience `sts.amazonaws.com`, GitHub organization `SoftwareEngAhmetDemir`, repository `vpc`, branch `main`. Attach `github-deploy-ssm`. Name it `github-deploy-role`. The branch restriction matters because the repo is public: only runs of `main` in this repo can assume the role.
+
+   **Then edit the trust policy.** New GitHub repos put their numeric IDs in the token subject, so the wizard's plain-name `sub` is rejected ("Not authorized to perform sts:AssumeRoleWithWebIdentity"). Get the real prefix with `gh api repos/<owner>/<repo>/actions/oidc/customization/sub` (`sub_claim_prefix`), and in **Trust relationships → Edit trust policy** set the condition to:
+
+   ```json
+   "StringEquals": {
+     "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+     "token.actions.githubusercontent.com:sub": "repo:SoftwareEngAhmetDemir@43875085/vpc@1382315640:ref:refs/heads/main"
+   }
+   ```
 4. Add the repo variables (Settings → Secrets and variables → Actions → Variables, or `gh variable set`). None are secrets:
 
    ```bash
