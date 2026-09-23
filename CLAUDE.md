@@ -74,17 +74,19 @@ Frontend:
 
 `http://13.63.170.46` showed "Hello World" and the 3 items: browser, frontend nginx :80, proxy `/api/*`, backend Express :3001 (private), RDS :5432 (private). Backend and RDS have no public IP and no inbound route from the internet; the only public entry point is the frontend's port 80. The private subnets reach the internet outbound only, through the NAT gateway. Downside found: `/api/items` was readable by anyone through the nginx proxy, because the browser itself had to call it.
 
-## 8. Change: hide the API from the browser (DEPLOYED)
+## 8. Design history: private API vs browser-called API
 
-New design: `frontend/server.js` (Express, port 3000, run by pm2 as `frontend`) fetches `http://10.0.11.246:3001/api/items` server-side, injects the result into `index.html` as `window.__INITIAL_STATE__`, and returns 404 on `/api/*`. nginx forwards port 80 to `127.0.0.1:3000` and has no `/api` location. `App.jsx` uses the injected state in production and still fetches `VITE_API_URL` in local dev. `frontend/.env.production` was deleted. Nothing in AWS (SGs, subnets, routes) changed.
-Deploy scripts were also fixed: they use `$HOME/app`, the IMDSv2 token for the IP lookup, and `frontend-deploy.sh` removes the AL2023 default nginx server block itself (so the manual `sed` in section 6 is now part of the script). New: `deploy/update-backend.sh` (npm install, pm2 restart, health check), `deploy/ssm-run.sh` (SSM Run Command wrapper).
+First design (section 7): nginx served the React build and proxied `/api/*` to the backend, so the browser called `/api/items`. Concern raised: that URL is readable by anyone. Second design: `frontend/server.js` (Node, pm2) fetched the data server-side and embedded it in the HTML, with `/api/*` returning 404. That was deployed and verified (API 404 from the internet, page 200 with items embedded).
+Current decision (chosen by the user): the browser calls the API itself, like a normal SPA. Reverted to nginx static files plus `/api/` proxy: `frontend/server.js` and the `express` dependency were removed, `frontend/.env.production` (`VITE_API_URL=` empty, so same-origin) was restored, `App.jsx` fetches `/api/items` again, `nginx.conf.example` has the `/api/` proxy again. `deploy/frontend-deploy.sh` builds, copies `dist` to `/var/www/vpc-demo`, deletes the old pm2 `frontend` process, removes the AL2023 default nginx server block, writes the proxy conf, and curls `/` and `/api/items` as a health check. The CI step no longer runs `node --check` on a frontend server. Nothing in AWS changes: the backend and RDS are still private, and only nginx on the frontend can reach the backend. `/api/items` is public again by design; restricting it to logged-in users would need auth on the backend.
+Other deploy script fixes: use `$HOME/app`, the IMDSv2 token for the IP lookup. New helpers: `deploy/update-backend.sh` (npm install, pm2 restart, health check), `deploy/ssm-run.sh` (SSM Run Command wrapper).
+The revert is committed only after a push to `main`; that push deploys it through the pipeline.
 
 ## 9. CI/CD with GitHub Actions (DONE and working)
 
 `.github/workflows/deploy.yml`: CI (install, build, `node --check`, `bash -n`) on every push and PR. CD on pushes to `main` after CI passes: assumes `github-deploy-role` via OIDC (no stored keys), then runs through SSM Run Command as `ssm-user`: `deploy/update-backend.sh` on the backend, `deploy/frontend-deploy.sh` on the frontend, both after `git reset --hard <commit>` in `~/app`. The deploy job is skipped if repo variable `AWS_ROLE_ARN` is unset.
 GitHub repo variables (set with `gh variable set`, none secret): `AWS_REGION=eu-north-1`, `AWS_ROLE_ARN`, `BACKEND_INSTANCE_ID`, `FRONTEND_INSTANCE_ID`, `BACKEND_PRIVATE_IP=10.0.11.246`.
 Problem hit: the first deploy failed with "Not authorized to perform sts:AssumeRoleWithWebIdentity" although the trust policy looked right. This repo uses immutable OIDC subjects (`gh api repos/SoftwareEngAhmetDemir/vpc/actions/oidc/customization/sub` shows the prefix), so the token `sub` contains owner and repo IDs. Fixed by editing the trust policy `sub` to the ID form (section 3).
-First successful run (re-run of run 35928625323): CI 11s, deploy 49s. Verified afterwards from outside: `/api/items` returns 404, `/` returns 200 with the items embedded in the HTML, backend private IP unreachable.
+First successful run (re-run of run 35928625323): CI 11s, deploy 49s. Verified afterwards from outside (server-side fetch design at that time): `/api/items` 404, `/` 200 with items embedded, backend private IP unreachable.
 Not automated: `schema.sql` (run `psql` by hand from the backend), `backend/.env` edits, any AWS infrastructure change.
 
 ## 10. Open items

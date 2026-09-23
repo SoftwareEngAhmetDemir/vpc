@@ -15,7 +15,7 @@ Goal architecture:
    │   │ EC2: frontend (nginx + React) │   │ NAT Gateway│ │
    │   │ public IP, SG: frontend-sg    │   └─────┬──────┘ │
    │   └───────────────┬───────────────┘         │        │
-   │                   │ server-side fetch        │        │
+   │                   │ proxies /api/*           │        │
    │                   ▼                          │        │
    │   PRIVATE SUBNET A (10.0.11.0/24, AZ-a)       │        │
    │   ┌───────────────────────────────┐          │        │
@@ -178,15 +178,15 @@ You'll attach this to the backend (and optionally frontend) EC2 instance at laun
    bash frontend-deploy.sh
    ```
 
-   This installs nginx/Node/git, clones the repo, builds the React app, and runs `frontend/server.js` under `pm2`. That Node server calls the backend's private IP (`BACKEND_URL`), embeds the items in the HTML it returns, and answers 404 on `/api/*`. nginx just forwards port 80 to it. The browser never calls the API, so the API has no public URL.
+   This installs nginx/Node/git, clones the repo, builds the React app (`VITE_API_URL` empty, so the browser calls `/api/items` on the same origin), copies the build to `/var/www/vpc-demo`, and writes an nginx config that serves it and proxies `/api/*` to the backend's private IP. It also removes AL2023's built-in default nginx server block, which would otherwise shadow ours and return 404.
 
 ## 11. Test it
 
 Open `http://<frontend public IP>` in a browser. You should see "Hello World" and the 3 seeded items — proving the full path: **browser → frontend EC2 (public subnet) → nginx proxy → backend EC2 (private subnet) → RDS (private subnet)**.
 
 Things to check if it doesn't work:
-- `curl http://localhost/` from the frontend box — the HTML should contain `window.__INITIAL_STATE__` with the items (tests nginx → frontend server → backend). `curl http://localhost/api/items` should return 404.
-- `pm2 logs frontend` on the frontend box — a "Failed to load items" line means it can't reach the backend.
+- `curl http://localhost/api/items` from the frontend box — tests the nginx proxy → backend hop.
+- `sudo tail /var/log/nginx/error.log` on the frontend box — a `connect() failed` line means nginx can't reach the backend (check `backend-sg`).
 - `curl http://<backend-private-ip>:3001/api/health` from the frontend box — tests frontend-sg → backend-sg connectivity directly.
 - `pm2 logs backend` on the backend box — check for DB connection errors (bad password, security group, or `DB_SSL` mismatch).
 - Security group rules — the single most common mistake is referencing a CIDR instead of the security group ID as the source.
