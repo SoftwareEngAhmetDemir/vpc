@@ -6,7 +6,7 @@ Built to be deployed into an AWS VPC with the frontend in a **public subnet** an
 ## Structure
 
 ```
-frontend/   React app (Vite). Fetches /api/items and renders the list.
+frontend/   React app (Vite) plus server.js: fetches the items from the backend server-side and embeds them in the page (no browser-visible API).
 backend/    Express API. GET /api/items reads from PostgreSQL. GET /api/health for checks.
 docker-compose.yml   Local PostgreSQL for development.
 DEPLOY_AWS.md         Step-by-step AWS Console guide: VPC, subnets, EC2, RDS.
@@ -51,7 +51,7 @@ DEPLOY_AWS.md         Step-by-step AWS Console guide: VPC, subnets, EC2, RDS.
 See [DEPLOY_AWS.md](DEPLOY_AWS.md). Summary of the target architecture:
 
 - **VPC** with 2 public subnets (different AZs) and 2 private subnets (different AZs)
-- **Public subnet**: frontend EC2 (nginx serves the React build, reverse-proxies `/api/*` to the backend)
+- **Public subnet**: frontend EC2 (nginx forwards to a Node server that serves the React build and fetches the data from the backend; `/api/*` is not exposed)
 - **Private subnet**: backend EC2 (Express API, no public IP, reached only via SSM) and RDS PostgreSQL (not publicly accessible)
 - **NAT Gateway** in the public subnet so private instances can reach the internet (package installs) without being reachable from it
 - **Security groups** scoped tightly: internet → frontend (80), frontend-sg → backend (3001), backend-sg → db (5432)

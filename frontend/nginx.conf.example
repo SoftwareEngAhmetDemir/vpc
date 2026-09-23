@@ -1,19 +1,12 @@
 # Copy to /etc/nginx/conf.d/vpc-demo.conf on the FRONTEND (public subnet) EC2 instance.
-# Replace BACKEND_PRIVATE_IP with the backend EC2 instance's private IP (e.g. 10.0.11.x).
+# nginx only forwards to the local Node frontend server; there is no public /api route.
 
 server {
     listen 80;
     server_name _;
 
-    root /var/www/vpc-demo/dist;
-    index index.html;
-
     location / {
-        try_files $uri /index.html;
-    }
-
-    location /api/ {
-        proxy_pass http://BACKEND_PRIVATE_IP:3001/api/;
+        proxy_pass http://127.0.0.1:3000;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
     }

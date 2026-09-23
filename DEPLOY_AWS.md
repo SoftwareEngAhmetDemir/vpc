@@ -15,7 +15,7 @@ Goal architecture:
    │   │ EC2: frontend (nginx + React) │   │ NAT Gateway│ │
    │   │ public IP, SG: frontend-sg    │   └─────┬──────┘ │
    │   └───────────────┬───────────────┘         │        │
-   │                   │ proxies /api/*           │        │
+   │                   │ server-side fetch        │        │
    │                   ▼                          │        │
    │   PRIVATE SUBNET A (10.0.11.0/24, AZ-a)       │        │
    │   ┌───────────────────────────────┐          │        │
@@ -178,14 +178,15 @@ You'll attach this to the backend (and optionally frontend) EC2 instance at laun
    bash frontend-deploy.sh
    ```
 
-   This installs nginx/Node/git, clones the repo, builds the React app with `VITE_API_URL` empty (same-origin), deploys the build to `/var/www/vpc-demo`, and writes an nginx config that proxies `/api/*` to the backend's private IP.
+   This installs nginx/Node/git, clones the repo, builds the React app, and runs `frontend/server.js` under `pm2`. That Node server calls the backend's private IP (`BACKEND_URL`), embeds the items in the HTML it returns, and answers 404 on `/api/*`. nginx just forwards port 80 to it. The browser never calls the API, so the API has no public URL.
 
 ## 11. Test it
 
 Open `http://<frontend public IP>` in a browser. You should see "Hello World" and the 3 seeded items — proving the full path: **browser → frontend EC2 (public subnet) → nginx proxy → backend EC2 (private subnet) → RDS (private subnet)**.
 
 Things to check if it doesn't work:
-- `curl http://localhost/api/items` from the frontend box — tests the nginx proxy → backend hop.
+- `curl http://localhost/` from the frontend box — the HTML should contain `window.__INITIAL_STATE__` with the items (tests nginx → frontend server → backend). `curl http://localhost/api/items` should return 404.
+- `pm2 logs frontend` on the frontend box — a "Failed to load items" line means it can't reach the backend.
 - `curl http://<backend-private-ip>:3001/api/health` from the frontend box — tests frontend-sg → backend-sg connectivity directly.
 - `pm2 logs backend` on the backend box — check for DB connection errors (bad password, security group, or `DB_SSL` mismatch).
 - Security group rules — the single most common mistake is referencing a CIDR instead of the security group ID as the source.
@@ -195,6 +196,50 @@ Things to check if it doesn't work:
 Delete in this order: EC2 instances (backend, frontend) → RDS instance (`vpc-demo-db`, skip final snapshot if you don't need one) → NAT Gateway (`vpc-demo-nat`) → release the Elastic IP → delete route tables, subnets, internet gateway, then the VPC itself. The NAT Gateway and any Elastic IP left allocated are the two things that quietly keep costing money if forgotten.
 
 ---
+
+## 13. CI/CD with GitHub Actions (optional)
+
+[.github/workflows/deploy.yml](.github/workflows/deploy.yml) runs on every push: CI builds and checks the code, then (on `main` only) CD deploys to both instances through **SSM Run Command**. GitHub logs in to AWS with **OIDC**, so no access keys are stored anywhere. The deploy job is skipped until the variable `AWS_ROLE_ARN` exists.
+
+Do this once in the Console (region eu-north-1 for the policy resource ARNs; IAM itself is global):
+
+1. **IAM → Identity providers → Add provider**: type **OpenID Connect**, provider URL `https://token.actions.githubusercontent.com`, audience `sts.amazonaws.com`. Add provider.
+2. **IAM → Policies → Create policy → JSON**, name `github-deploy-ssm`:
+
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [
+       {
+         "Effect": "Allow",
+         "Action": "ssm:SendCommand",
+         "Resource": [
+           "arn:aws:ec2:eu-north-1:087134855638:instance/<backend-instance-id>",
+           "arn:aws:ec2:eu-north-1:087134855638:instance/<frontend-instance-id>",
+           "arn:aws:ssm:eu-north-1::document/AWS-RunShellScript"
+         ]
+       },
+       {
+         "Effect": "Allow",
+         "Action": ["ssm:GetCommandInvocation", "ssm:ListCommandInvocations"],
+         "Resource": "*"
+       }
+     ]
+   }
+   ```
+
+3. **IAM → Roles → Create role**: trusted entity **Web identity**, provider `token.actions.githubusercontent.com`, audience `sts.amazonaws.com`, GitHub organization `SoftwareEngAhmetDemir`, repository `vpc`, branch `main`. Attach `github-deploy-ssm`. Name it `github-deploy-role`. The branch restriction matters because the repo is public: only runs of `main` in this repo can assume the role.
+4. Add the repo variables (Settings → Secrets and variables → Actions → Variables, or `gh variable set`). None are secrets:
+
+   ```bash
+   gh variable set AWS_REGION --body eu-north-1
+   gh variable set AWS_ROLE_ARN --body arn:aws:iam::087134855638:role/github-deploy-role
+   gh variable set BACKEND_INSTANCE_ID --body <backend-instance-id>
+   gh variable set FRONTEND_INSTANCE_ID --body <frontend-instance-id>
+   gh variable set BACKEND_PRIVATE_IP --body <backend-private-ip>
+   ```
+
+What a deploy does: the backend gets `git reset --hard <commit>`, `npm install`, `pm2 restart`, and a health check ([deploy/update-backend.sh](deploy/update-backend.sh)); it never touches `.env` or the database, so schema changes still need a manual `psql`. The frontend re-runs [deploy/frontend-deploy.sh](deploy/frontend-deploy.sh), which is safe to repeat. Watch runs in the repo's **Actions** tab; a failed deploy shows the instance's stdout/stderr in the log.
 
 ## Notes / next steps
 

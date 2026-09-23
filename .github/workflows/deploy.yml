@@ -1,0 +1,63 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Backend install and syntax check
+        working-directory: backend
+        run: |
+          npm ci
+          node --check server.js
+          node --check db.js
+      - name: Frontend install and build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+          node --check server.js
+      - name: Shell script syntax check
+        run: for f in deploy/*.sh; do bash -n "$f"; done
+
+  deploy:
+    needs: ci
+    # Only on pushes to main, and only once the AWS side is configured (repo variable AWS_ROLE_ARN).
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.AWS_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    concurrency:
+      group: deploy-aws
+      cancel-in-progress: false
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Deploy backend (private subnet, via SSM)
+        run: |
+          deploy/ssm-run.sh "${{ vars.BACKEND_INSTANCE_ID }}" \
+            "sudo -u ssm-user -H bash -c 'set -e; cd ~/app; git fetch origin; git reset --hard ${GITHUB_SHA}; bash deploy/update-backend.sh'"
+
+      - name: Deploy frontend (public subnet, via SSM)
+        run: |
+          deploy/ssm-run.sh "${{ vars.FRONTEND_INSTANCE_ID }}" \
+            "sudo -u ssm-user -H bash -c 'set -e; cd ~/app; git fetch origin; git reset --hard ${GITHUB_SHA}; REPO_URL=https://github.com/${GITHUB_REPOSITORY}.git BACKEND_PRIVATE_IP=${{ vars.BACKEND_PRIVATE_IP }} bash deploy/frontend-deploy.sh'"

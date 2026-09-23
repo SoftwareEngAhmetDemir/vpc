@@ -1,15 +1,18 @@
 import { useEffect, useState } from "react";
 import "./App.css";
 
-// Empty string means "same origin" (prod, behind nginx reverse proxy on the frontend EC2).
+// In production the frontend server injects the data into the page, so the browser never calls the API.
+// In dev (no injected state) the app fetches the backend directly.
+const initial = window.__INITIAL_STATE__;
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
 
 function App() {
-  const [items, setItems] = useState([]);
-  const [error, setError] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [items, setItems] = useState(initial?.items ?? []);
+  const [error, setError] = useState(initial?.error ?? null);
+  const [loading, setLoading] = useState(!initial);
 
   useEffect(() => {
+    if (initial) return;
     fetch(`${API_URL}/api/items`)
       .then((res) => {
         if (!res.ok) throw new Error(`Request failed: ${res.status}`);
