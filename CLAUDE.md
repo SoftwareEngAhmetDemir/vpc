@@ -20,7 +20,7 @@ Everything created or changed in AWS for this project, in the order it was done.
 
 | Name | ID | Inbound |
 |---|---|---|
-| `frontend-sg` | `sg-0b5d57261be03d187` | HTTP 80 from `0.0.0.0/0` |
+| `frontend-sg` | `sg-0b5d57261be03d187` | HTTP 80 and HTTPS 443 from `0.0.0.0/0` (443 added 2026-09-24, rule `sgr-09e874015c632263e`) |
 | `backend-sg` | `sg-0fd97fc339130e522` | TCP 3001 from `frontend-sg` |
 | `db-sg` | created third | PostgreSQL 5432 from `backend-sg` |
 
@@ -89,15 +89,16 @@ Problem hit: the first deploy failed with "Not authorized to perform sts:AssumeR
 First successful run (re-run of run 35928625323): CI 11s, deploy 49s. Verified afterwards from outside (server-side fetch design at that time): `/api/items` 404, `/` 200 with items embedded, backend private IP unreachable.
 Not automated: `schema.sql` (run `psql` by hand from the backend), `backend/.env` edits, any AWS infrastructure change.
 
-## 9b. HTTPS (code written, AWS side NOT done yet)
+## 9b. HTTPS
 
-Why: the site only worked on the laptop; phones block or rewrite plain `http://` to a bare IP, and the server had no HTTPS (only port 80 open, no certificate). Note: my earlier "reachable" curl tests ran on the user's own laptop (same network), so they proved nothing about other networks; the AWS side (SG 80 open to 0.0.0.0/0, IGW route, public IP) was already fully public.
-Code: `deploy/frontend-deploy.sh` now derives a hostname (`DOMAIN` env, default `<public-ip-with-dashes>.sslip.io` from IMDSv2), renders the HTTP config (`frontend/nginx.conf.example`, includes the ACME challenge path), installs certbot in `/opt/certbot` (venv), runs `certbot certonly --webroot -w /var/www/certbot`, then renders `frontend/nginx-ssl.conf.example` (80 redirects to `https://<name>`, 443 serves the app and proxies `/api/` to the backend) and installs `certbot-renew.timer` (systemd, twice daily, reloads nginx). If issuing fails it leaves the HTTP site running and exits non-zero. Workflow passes optional repo variables `DOMAIN` and `CERT_EMAIL`. Both nginx templates were rendered and checked with `nginx -t` locally (self-signed test cert); the real certificate flow has NOT been run yet.
-AWS changes still to make (steps in `DEPLOY_AWS.md` section 14): allocate an Elastic IP and associate it with the `frontend` instance (the current `13.63.170.46` is released; the new IP defines the hostname), and add inbound HTTPS 443 from `0.0.0.0/0` to `frontend-sg`. Then push or run the workflow.
+Why: the site only worked on the laptop; phones block or rewrite plain `http://` to a bare IP, and the server had no HTTPS. (Earlier "reachable" curl tests ran on the user's own laptop, so they proved nothing about other networks; the AWS side was already fully public.)
+Step 1 (live, verified): the pipeline deploy (commit `0518af9`) issued a Let's Encrypt certificate for `13-63-170-46.sslip.io` (expires 2026-12-23) and nginx redirected `http://13.63.170.46/` to `https://13-63-170-46.sslip.io/`. It ran BEFORE port 443 was open, so for a while the redirect landed on a timeout; fixed by adding HTTPS 443 from `0.0.0.0/0` to `frontend-sg` (open 443 before deploying). Verified from outside afterwards: 200, valid certificate, `/api/items` over HTTPS, backend private IP unreachable.
+Step 2 (code written, NOT deployed yet): the user did not want the redirect to a hostname and asked for `https://13.63.170.46` directly. `deploy/frontend-deploy.sh` now defaults to a Let's Encrypt IP-address certificate (research: GA since 2026-01-15, `shortlived` profile, ~6 days, HTTP-01, certbot >= 5.3.0 with `--ip-address`, which works only with the standalone/manual plugin). It builds `/opt/certbot` from Python 3.12/3.11 if certbot is older than 5.3.0, issues `certbot certonly --standalone --ip-address <ip> --preferred-profile shortlived --cert-name ip-<ip>` with `--pre-hook "systemctl stop nginx" --post-hook "systemctl start nginx"`, renders `frontend/nginx-ip.conf.example` (80 and 443 both serve the site, NO redirect), deletes older certs (the sslip.io one), runs `certbot renew --dry-run`, and installs `certbot-renew.timer` (twice daily; each renewal briefly stops nginx). `DOMAIN` repo variable set => domain mode instead (`nginx-ssl.conf.example`, webroot, redirect to `https://<domain>`). If issuing fails, the existing nginx config keeps running and the deploy exits non-zero. All three nginx templates pass `nginx -t` locally; the real IP-certificate issuance and renewal have NOT been run yet.
+Still to do: allocate an Elastic IP and associate it with `frontend` (`DEPLOY_AWS.md` section 14). Until then the certificate is tied to the auto-assigned IP `13.63.170.46`; if the instance is stopped and started the IP changes, and the next deploy issues a new certificate.
 
 ## 10. Open items
 
 - The GitHub repo is public (needed so the instances can `git clone` without credentials). The role trust policy only allows `main` of this repo, so forks and PRs cannot deploy.
 - The RDS master password was typed into a chat and shell history. Rotate it or move it to Secrets Manager beyond a demo.
-- The frontend public IP `13.63.170.46` is auto-assigned, not an Elastic IP, and changes if the instance is stopped and started.
+- The frontend public IP `13.63.170.46` is auto-assigned, not an Elastic IP, and changes if the instance is stopped and started; the IP certificate depends on it (see 9b).
 - Billing while running: NAT gateway (hourly + data), RDS `db.t4g.micro`, two t3.micro. Teardown order: EC2 instances, RDS (skip final snapshot), NAT gateway, release its Elastic IP, then route tables, subnets, IGW, VPC (see `DEPLOY_AWS.md` step 12). For the pipeline, also delete `github-deploy-role`, `github-deploy-ssm` and the OIDC provider if unused.
