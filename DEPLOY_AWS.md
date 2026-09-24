@@ -250,6 +250,21 @@ Do this once in the Console (region eu-north-1 for the policy resource ARNs; IAM
 
 What a deploy does: the backend gets `git reset --hard <commit>`, `npm install`, `pm2 restart`, and a health check ([deploy/update-backend.sh](deploy/update-backend.sh)); it never touches `.env` or the database, so schema changes still need a manual `psql`. The frontend re-runs [deploy/frontend-deploy.sh](deploy/frontend-deploy.sh), which is safe to repeat. Watch runs in the repo's **Actions** tab; a failed deploy shows the instance's stdout/stderr in the log.
 
+## 14. HTTPS with a free certificate (optional, recommended for phones)
+
+Many phones and browsers block or rewrite plain `http://` to a bare IP. [deploy/frontend-deploy.sh](deploy/frontend-deploy.sh) can serve HTTPS with a free Let's Encrypt certificate. By default it uses the hostname `<ip-with-dashes>.sslip.io` (for example `13-63-170-46.sslip.io`), a free public DNS name that resolves to that IP, so no domain purchase is needed. It installs certbot, gets the certificate, redirects HTTP to HTTPS, and sets up automatic renewal (a systemd timer). If issuing the certificate fails, the site keeps working over HTTP and the deploy is marked failed.
+
+Do this once in the Console:
+
+1. **EC2 → Elastic IPs → Allocate Elastic IP address → Allocate.** Then select it → **Actions → Associate Elastic IP address** → resource type Instance → choose `frontend` → Associate. The instance's old auto-assigned public IP is released and replaced by this fixed one. Note the new IP. (Without this, the IP changes whenever the instance is stopped, and the certificate name would change with it.)
+2. **EC2 → Security Groups → `frontend-sg` → Edit inbound rules → Add rule**: type **HTTPS**, source `0.0.0.0/0`. Save. Keep the HTTP (80) rule: it is needed for the certificate check and for the redirect.
+3. Optional, own domain instead of sslip.io: create an `A` record pointing your domain at the Elastic IP, then `gh variable set DOMAIN --body app.example.com` (and optionally `gh variable set CERT_EMAIL --body you@example.com` for expiry notices).
+4. Push to `main`, or run the workflow by hand from the Actions tab. The deploy prints `Frontend deployed: https://<name>/`.
+
+The site is then at `https://<new-ip-with-dashes>.sslip.io/`. Opening `http://<ip>` redirects there. Certificates last 90 days and renew on their own.
+
+Limits: certificates are per hostname, and Let's Encrypt caps how many it issues per week for a shared parent name like `sslip.io`. If issuing fails with a rate-limit message, use your own domain (step 3). An Elastic IP costs a small hourly fee like any public IPv4 address; release it during teardown.
+
 ## Notes / next steps
 
 - This uses **EC2 + SSM** for the private backend to avoid needing a bastion host — simplest way to poke around a private subnet from the console.

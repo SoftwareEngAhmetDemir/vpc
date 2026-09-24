@@ -89,6 +89,12 @@ Problem hit: the first deploy failed with "Not authorized to perform sts:AssumeR
 First successful run (re-run of run 35928625323): CI 11s, deploy 49s. Verified afterwards from outside (server-side fetch design at that time): `/api/items` 404, `/` 200 with items embedded, backend private IP unreachable.
 Not automated: `schema.sql` (run `psql` by hand from the backend), `backend/.env` edits, any AWS infrastructure change.
 
+## 9b. HTTPS (code written, AWS side NOT done yet)
+
+Why: the site only worked on the laptop; phones block or rewrite plain `http://` to a bare IP, and the server had no HTTPS (only port 80 open, no certificate). Note: my earlier "reachable" curl tests ran on the user's own laptop (same network), so they proved nothing about other networks; the AWS side (SG 80 open to 0.0.0.0/0, IGW route, public IP) was already fully public.
+Code: `deploy/frontend-deploy.sh` now derives a hostname (`DOMAIN` env, default `<public-ip-with-dashes>.sslip.io` from IMDSv2), renders the HTTP config (`frontend/nginx.conf.example`, includes the ACME challenge path), installs certbot in `/opt/certbot` (venv), runs `certbot certonly --webroot -w /var/www/certbot`, then renders `frontend/nginx-ssl.conf.example` (80 redirects to `https://<name>`, 443 serves the app and proxies `/api/` to the backend) and installs `certbot-renew.timer` (systemd, twice daily, reloads nginx). If issuing fails it leaves the HTTP site running and exits non-zero. Workflow passes optional repo variables `DOMAIN` and `CERT_EMAIL`. Both nginx templates were rendered and checked with `nginx -t` locally (self-signed test cert); the real certificate flow has NOT been run yet.
+AWS changes still to make (steps in `DEPLOY_AWS.md` section 14): allocate an Elastic IP and associate it with the `frontend` instance (the current `13.63.170.46` is released; the new IP defines the hostname), and add inbound HTTPS 443 from `0.0.0.0/0` to `frontend-sg`. Then push or run the workflow.
+
 ## 10. Open items
 
 - The GitHub repo is public (needed so the instances can `git clone` without credentials). The role trust policy only allows `main` of this repo, so forks and PRs cannot deploy.

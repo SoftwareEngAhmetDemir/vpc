@@ -59,4 +59,4 @@ jobs:
       - name: Deploy frontend (public subnet, via SSM)
         run: |
           deploy/ssm-run.sh "${{ vars.FRONTEND_INSTANCE_ID }}" \
-            "sudo -u ssm-user -H bash -c 'set -e; cd ~/app; git fetch origin; git reset --hard ${GITHUB_SHA}; REPO_URL=https://github.com/${GITHUB_REPOSITORY}.git BACKEND_PRIVATE_IP=${{ vars.BACKEND_PRIVATE_IP }} bash deploy/frontend-deploy.sh'"
+            "sudo -u ssm-user -H bash -c 'set -e; cd ~/app; git fetch origin; git reset --hard ${GITHUB_SHA}; REPO_URL=https://github.com/${GITHUB_REPOSITORY}.git BACKEND_PRIVATE_IP=${{ vars.BACKEND_PRIVATE_IP }} DOMAIN=${{ vars.DOMAIN }} CERT_EMAIL=${{ vars.CERT_EMAIL }} bash deploy/frontend-deploy.sh'"

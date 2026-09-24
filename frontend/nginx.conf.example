@@ -1,3 +1,4 @@
+# HTTP-only config, used before a certificate exists (and as the fallback if issuing one fails).
 # Copy to /etc/nginx/conf.d/vpc-demo.conf on the FRONTEND (public subnet) EC2 instance.
 # Replace BACKEND_PRIVATE_IP with the backend EC2 instance's private IP (e.g. 10.0.11.x).
 
@@ -7,6 +8,10 @@ server {
 
     root /var/www/vpc-demo/dist;
     index index.html;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
 
     location / {
         try_files $uri /index.html;
